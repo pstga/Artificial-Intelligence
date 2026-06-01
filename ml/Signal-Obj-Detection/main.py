@@ -4,11 +4,11 @@ import numpy as np
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, Subset
-from sklearn.model_selection import KFold
+from sklearn.model_selection import KFold, ShuffleSplit
 
 # Assuming these are properly defined in your other files
 from data_process import CustomImageDataset, train_transform, val_transform, evaluate_classes
-from model7 import CustomResNet_Large
+from model8 import CustomResNet_Medium
 from train import train_model
 
 
@@ -38,7 +38,7 @@ def main():
     )
 
     # 2. Setup K-Fold
-    kfold = KFold(n_splits=k_folds, shuffle=True, random_state=197)
+    kfold = ShuffleSplit(n_splits=k_folds, test_size=0.2, random_state=197)
     dataset_indices = np.arange(len(full_train_dataset))
 
     print(f"\n{'=' * 50}")
@@ -58,8 +58,12 @@ def main():
         val_loader = DataLoader(val_sub, batch_size=batch_size, shuffle=False)
 
         # MUST re-initialize the model, criterion, optimizer, and scheduler for every fold!
-        model = CustomResNet_Large(num_classes=num_classes)
-        criterion = torch.nn.SmoothL1Loss()
+        # MOVED: Model initialization is now inside the loop to prevent weight leakage across folds
+        model = CustomResNet_Medium(num_classes=num_classes)
+
+        # CHANGED: Swapped SmoothL1Loss (Regression) for CrossEntropyLoss (Classification)
+        criterion = torch.nn.CrossEntropyLoss(label_smoothing=0.1)
+
         optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=0.05)
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs, eta_min=1e-6)
 
@@ -72,12 +76,11 @@ def main():
             optimizer=optimizer,
             scheduler=scheduler,
             num_epochs=num_epochs,
-            mixup=True,
+            mixup=False,
             fold=current_fold,
             save_dir=save_dir
         )
 
-        print(f"✅ Fold {current_fold} Training Complete.")
 
         # Optionally evaluate the absolute best weights for this fold
         print(f"\n[ Evaluating Best Weights for Fold {current_fold} ]")
