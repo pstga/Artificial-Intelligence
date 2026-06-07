@@ -8,7 +8,7 @@ from sklearn.model_selection import KFold, ShuffleSplit
 
 # Assuming these are properly defined in your other files
 from data_process import CustomImageDataset, train_transform, val_transform, evaluate_classes
-from model8 import CustomResNet_Medium
+from model6 import CustomResNet_Large
 from train import train_model
 
 
@@ -59,7 +59,7 @@ def main():
 
         # MUST re-initialize the model, criterion, optimizer, and scheduler for every fold!
         # MOVED: Model initialization is now inside the loop to prevent weight leakage across folds
-        model = CustomResNet_Medium(num_classes=num_classes)
+        model = CustomResNet_Large(num_classes=num_classes)
 
         # CHANGED: Swapped SmoothL1Loss (Regression) for CrossEntropyLoss (Classification)
         criterion = torch.nn.CrossEntropyLoss(label_smoothing=0.1)
