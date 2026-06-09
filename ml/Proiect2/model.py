@@ -11,26 +11,22 @@ def drop_path(x, drop_prob: float = 0., training: bool = False):
     shape = (x.shape[0],) + (1,) * (x.ndim - 1)
     random_tensor = keep_prob + torch.rand(shape, dtype=x.dtype, device=x.device)
     random_tensor.floor_()
-    output = x.div(keep_prob) * random_tensor
-    return output
+    return x.div(keep_prob) * random_tensor
 
 
 class AddSpatialCoords(nn.Module):
-    """Acum adăugăm atât axa Frecvenței (Y) cât și axa Timpului (X)"""
-
     def __init__(self):
         super().__init__()
 
     def forward(self, x):
         b, _, h, w = x.size()
-        # Coordonate Y (Frecvență)
+        # axa y - frecventa
         y_coords = torch.linspace(-1, 1, steps=h, device=x.device)
         y_coords = y_coords.view(1, 1, h, 1).expand(b, 1, h, w)
-        # Coordonate X (Timp)
+        # axa y - timp
         x_coords = torch.linspace(-1, 1, steps=w, device=x.device)
         x_coords = x_coords.view(1, 1, 1, w).expand(b, 1, h, w)
 
-        # Concat: Acum avem 3 canale (Grayscale + Y + X)
         return torch.cat([x, y_coords, x_coords], dim=1)
 
 
@@ -52,7 +48,7 @@ class SEBlock(nn.Module):
         return x * y.expand_as(x)
 
 
-class LiteBlock(nn.Module):
+class CompBlock(nn.Module):
     def __init__(self, in_channels, out_channels, stride=1, drop_prob=0.0):
         super().__init__()
         self.drop_prob = drop_prob
@@ -91,28 +87,28 @@ class LiteBlock(nn.Module):
         return out
 
 
-class SpectroNeXt(nn.Module):
+class SpectroModel(nn.Module):
     def __init__(self, num_classes=5, drop_path_rate=0.4):
         super().__init__()
         self.coords = AddSpatialCoords()
 
-        # SCHIMBAT LA 3 CANALE (din cauza coordonatelor 2D de mai sus)
         self.stem = nn.Sequential(
             nn.Conv2d(3, 32, kernel_size=3, stride=2, padding=1, bias=False),
             nn.BatchNorm2d(32),
             nn.ReLU(inplace=True)
         )
 
-        dpr = [x.item() for x in torch.linspace(0, drop_path_rate, 7)]
+        dpr = torch.linspace(0, drop_path_rate, 7).tolist()
 
+        # varianta initiala de structura a blocurilor
         self.blocks = nn.ModuleList([
-            LiteBlock(32, 64, stride=1, drop_prob=dpr[0]),  # was 32→64, now 32→32
-            LiteBlock(64, 64, stride=1, drop_prob=dpr[1]),  # was 64→64, now 32→64  ← mismatch stops here in log
-            LiteBlock(64, 128, stride=2, drop_prob=dpr[2]),
-            LiteBlock(128, 128, stride=1, drop_prob=dpr[3]),
-            LiteBlock(128, 256, stride=2, drop_prob=dpr[4]),
-            LiteBlock(256, 256, stride=1, drop_prob=dpr[5]),
-            LiteBlock(256, 512, stride=2, drop_prob=dpr[6])
+            CompBlock(32, 64, stride=1, drop_prob=dpr[0]),
+            CompBlock(64, 64, stride=1, drop_prob=dpr[1]),
+            CompBlock(64, 128, stride=2, drop_prob=dpr[2]),
+            CompBlock(128, 128, stride=1, drop_prob=dpr[3]),
+            CompBlock(128, 256, stride=2, drop_prob=dpr[4]),
+            CompBlock(256, 256, stride=1, drop_prob=dpr[5]),
+            CompBlock(256, 512, stride=2, drop_prob=dpr[6])
         ])
 
         self.out_conv = nn.Sequential(
@@ -121,6 +117,7 @@ class SpectroNeXt(nn.Module):
             nn.ReLU(inplace=True)
         )
 
+        # pooling simplu doar cu average pool
         self.pool = nn.AdaptiveAvgPool2d(1)
         self.dropout = nn.Dropout(0.5)
         self.fc = nn.Linear(1024, num_classes)

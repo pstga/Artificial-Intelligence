@@ -11,12 +11,10 @@ def drop_path(x, drop_prob: float = 0., training: bool = False):
     shape = (x.shape[0],) + (1,) * (x.ndim - 1)
     random_tensor = keep_prob + torch.rand(shape, dtype=x.dtype, device=x.device)
     random_tensor.floor_()
-    output = x.div(keep_prob) * random_tensor
-    return output
+    return x.div(keep_prob) * random_tensor
 
 
 class AddSpatialCoords(nn.Module):
-    """Adaugam axa Frecventei (Y) si axa Timpului (X)"""
 
     def __init__(self):
         super().__init__()
@@ -49,14 +47,6 @@ class SEBlock(nn.Module):
 
 
 class AxialAttention(nn.Module):
-    """
-    Factored axial attention: first along W (time axis), then along H (frequency axis).
-    Each pass is a standard multi-head self-attention over 1D sequences, with a
-    learned relative position bias so the model knows where along the axis each
-    token sits. A residual + LayerNorm wraps each pass.
-
-    Complexity: O(H * W^2 + W * H^2)  vs  O((H*W)^2) for full self-attention.
-    """
 
     def __init__(self, channels, num_heads=4, max_len=128):
         super().__init__()
@@ -65,52 +55,41 @@ class AxialAttention(nn.Module):
         self.head_dim = channels // num_heads
         self.scale = self.head_dim ** -0.5
 
-        # --- Time axis (W) attention ---
         self.qkv_w = nn.Linear(channels, channels * 3, bias=False)
         self.proj_w = nn.Linear(channels, channels, bias=False)
         self.norm_w = nn.LayerNorm(channels)
-        # Relative position bias table for time axis: (2*max_len - 1) positions
         self.rel_bias_w = nn.Embedding(2 * max_len - 1, num_heads)
-        self._register_rel_index("rel_idx_w", max_len)
+        self.register_rel_index("rel_idx_w", max_len)
 
-        # --- Frequency axis (H) attention ---
         self.qkv_h = nn.Linear(channels, channels * 3, bias=False)
         self.proj_h = nn.Linear(channels, channels, bias=False)
         self.norm_h = nn.LayerNorm(channels)
-        # Relative position bias table for freq axis
+
         self.rel_bias_h = nn.Embedding(2 * max_len - 1, num_heads)
-        self._register_rel_index("rel_idx_h", max_len)
+        self.register_rel_index("rel_idx_h", max_len)
         nn.init.zeros_(self.proj_w.weight)
         nn.init.zeros_(self.proj_h.weight)
 
-    def _register_rel_index(self, name: str, max_len: int):
-        """Pre-compute relative position indices for a 1-D sequence of max_len."""
+    def register_rel_index(self, name: str, max_len: int):
         positions = torch.arange(max_len)
-        rel = positions.unsqueeze(0) - positions.unsqueeze(1)   # (L, L)
-        rel = rel + (max_len - 1)                                # shift to [0, 2*max_len-2]
-        self.register_buffer(name, rel)                          # (max_len, max_len)
+        rel = positions.unsqueeze(0) - positions.unsqueeze(1)
+        rel = rel + (max_len - 1)
+        self.register_buffer(name, rel)
 
-    def _1d_attn(self, x_seq, qkv_layer, proj_layer, rel_bias_emb, rel_idx_buf):
-        """
-        x_seq: (N, L, C)  — N independent sequences of length L
-        Returns: (N, L, C)
-        """
+    def attn_1d(self, x_seq, qkv_layer, proj_layer, rel_bias_emb, rel_idx_buf):
         N, L, C = x_seq.shape
         H = self.num_heads
         D = self.head_dim
 
-        qkv = qkv_layer(x_seq)                          # (N, L, 3C)
+        qkv = qkv_layer(x_seq)
         qkv = qkv.reshape(N, L, 3, H, D).permute(2, 0, 3, 1, 4)
-        q, k, v = qkv.unbind(0)                          # each (N, H, L, D)
+        q, k, v = qkv.unbind(0)
 
-        attn = (q @ k.transpose(-2, -1)) * self.scale    # (N, H, L, L)
-
-        # Add relative position bias — slice the pre-computed table to actual L
-        rel_idx = rel_idx_buf[:L, :L]                    # (L, L)
-        # Clamp in case actual L > max_len (graceful degradation)
+        attn = (q @ k.transpose(-2, -1)) * self.scale
+        rel_idx = rel_idx_buf[:L, :L]
         rel_idx = rel_idx.clamp(0, rel_bias_emb.num_embeddings - 1)
-        bias = rel_bias_emb(rel_idx)                     # (L, L, H)
-        attn = attn + bias.permute(2, 0, 1).unsqueeze(0) # broadcast over N
+        bias = rel_bias_emb(rel_idx)
+        attn = attn + bias.permute(2, 0, 1).unsqueeze(0)
 
         attn = attn.softmax(dim=-1)
         out = (attn @ v).transpose(1, 2).reshape(N, L, C)
@@ -119,22 +98,20 @@ class AxialAttention(nn.Module):
     def forward(self, x):
         B, C, H, W = x.shape
 
-        # Pass 1: Time axis — Pre-Norm
         x_w = self.norm_w(x.permute(0, 2, 3, 1)).reshape(B * H, W, C)
-        x_w_out = self._1d_attn(x_w, self.qkv_w, self.proj_w,
+        x_w_out = self.attn_1d(x_w, self.qkv_w, self.proj_w,
                                 self.rel_bias_w, self.rel_idx_w)
         x = x + x_w_out.reshape(B, H, W, C).permute(0, 3, 1, 2)
 
-        # Pass 2: Frequency axis — Pre-Norm
         x_h = self.norm_h(x.permute(0, 2, 3, 1)).reshape(B * W, H, C)
-        x_h_out = self._1d_attn(x_h, self.qkv_h, self.proj_h,
+        x_h_out = self.attn_1d(x_h, self.qkv_h, self.proj_h,
                                 self.rel_bias_h, self.rel_idx_h)
         x = x + x_h_out.reshape(B, W, H, C).permute(0, 3, 2, 1)
 
         return x
 
 
-class LiteBlock(nn.Module):
+class CompBlock(nn.Module):
     def __init__(self, in_channels, out_channels, stride=1, drop_prob=0.0):
         super().__init__()
         self.drop_prob = drop_prob
@@ -173,7 +150,7 @@ class LiteBlock(nn.Module):
         return out
 
 
-class SpectroNeXt(nn.Module):
+class SpectroModel(nn.Module):
     def __init__(self, num_classes=5, drop_path_rate=0.4, attn_heads=4, attn_max_len=128):
         super().__init__()
         self.coords = AddSpatialCoords()
@@ -184,21 +161,20 @@ class SpectroNeXt(nn.Module):
             nn.ReLU(inplace=True)
         )
 
-        dpr = [x.item() for x in torch.linspace(0, drop_path_rate, 7)]
+        dpr = torch.linspace(0, drop_path_rate, 7).tolist()
 
+        # revin la structura de blocuri din primul model dar cu straturi de atentie axiala
         self.blocks = nn.ModuleList([
-            LiteBlock(32,  64,  stride=1, drop_prob=dpr[0]),
-            LiteBlock(64,  64,  stride=1, drop_prob=dpr[1]),
-            LiteBlock(64,  128, stride=2, drop_prob=dpr[2]),
-            LiteBlock(128, 128, stride=1, drop_prob=dpr[3]),
-            LiteBlock(128, 256, stride=2, drop_prob=dpr[4]),  # block 4 — gets attention
-            LiteBlock(256, 256, stride=1, drop_prob=dpr[5]),  # block 5 — gets attention
-            LiteBlock(256, 512, stride=2, drop_prob=dpr[6])   # block 6 — gets attention
+            CompBlock(32,  64,  stride=1, drop_prob=dpr[0]),
+            CompBlock(64,  64,  stride=1, drop_prob=dpr[1]),
+            CompBlock(64,  128, stride=2, drop_prob=dpr[2]),
+            CompBlock(128, 128, stride=1, drop_prob=dpr[3]),
+            CompBlock(128, 256, stride=2, drop_prob=dpr[4]),  # block 4 — gets attention
+            CompBlock(256, 256, stride=1, drop_prob=dpr[5]),  # block 5 — gets attention
+            CompBlock(256, 512, stride=2, drop_prob=dpr[6])   # block 6 — gets attention
         ])
 
-        # Axial attention after blocks 4, 5, 6
-        # max_len=128 comfortably covers the spatial dims at these depths;
-        # actual H/W will be much smaller so the relative index is sliced down.
+        # modulele de atentie axiala pentru ultimele blocuri din retea
         self.attn4 = AxialAttention(256, num_heads=attn_heads, max_len=attn_max_len)
         self.attn5 = AxialAttention(256, num_heads=attn_heads, max_len=attn_max_len)
         self.attn6 = AxialAttention(512, num_heads=attn_heads, max_len=attn_max_len)
@@ -209,6 +185,7 @@ class SpectroNeXt(nn.Module):
             nn.ReLU(inplace=True)
         )
 
+        # revenim la average pool simplu din primul model
         self.pool = nn.AdaptiveAvgPool2d(1)
         self.dropout = nn.Dropout(0.5)
         self.fc = nn.Linear(1024, num_classes)
@@ -219,6 +196,7 @@ class SpectroNeXt(nn.Module):
 
         for i, block in enumerate(self.blocks):
             x = block(x)
+            # aplicam atentia axiala pe iesirea blocurilor 4, 5 si 6
             if i == 4:
                 x = self.attn4(x)
             elif i == 5:
