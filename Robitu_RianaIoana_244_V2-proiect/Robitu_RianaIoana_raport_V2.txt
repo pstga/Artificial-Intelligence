@@ -1,0 +1,5 @@
+Raport al experimentelor:
+
+Exercitiul 1:
+
+Am ales sa antrenez datele cu ajutorul k-fold cu 3 fold-uri, asemenea laboratoarelor. Am creat o functie pentru a incerca mai multe valori pentru parametrul alfa in regresia Rdige, incercand valori de la 1 la 5000. Am ajuns la concluzia ca valoarea 4000 a fost optima pentru antrenarea datelor de train, avand MSE = 0.791 aproximativ. Pastrand si folosind acest hiperparametru, l-am folosit mai departe pentru a antrena modelul propriu-zis folosit, avand prediction-urile din fisierul submis. 
